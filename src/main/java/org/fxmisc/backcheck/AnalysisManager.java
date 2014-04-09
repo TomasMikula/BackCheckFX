@@ -4,6 +4,8 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
@@ -69,15 +71,32 @@ public final class AnalysisManager<K, T, R> {
         return new ResultTransformationStream<U>(transformation);
     }
 
-    public <U> void withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback) {
+    public <U> CompletionStage<Void> withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        withTransformedResult(id, transformation, callback, future);
+        return future;
+    }
+
+    private <U> void withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback, CompletableFuture<Void> toComplete) {
         long revision = currentRevision;
         asyncAnalyzer.consumeResult(id, (k, r) -> {
-            U u = transformation.apply(k, r);
+            U u;
+            try {
+                u = transformation.apply(k, r);
+            } catch(Throwable t) {
+                toComplete.completeExceptionally(t);
+                return;
+            }
             clientThreadExecutor.execute(() -> {
                 if(revision == currentRevision) {
-                    callback.accept(k, u);
+                    try {
+                        callback.accept(k, u);
+                        toComplete.complete(null);
+                    } catch(Throwable t) {
+                        toComplete.completeExceptionally(t);
+                    }
                 } else { // try again
-                    withTransformedResult(id, transformation, callback);
+                    withTransformedResult(id, transformation, callback, toComplete);
                 }
             });
         });
