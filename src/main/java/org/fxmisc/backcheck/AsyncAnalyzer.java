@@ -2,12 +2,15 @@ package org.fxmisc.backcheck;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public interface AsyncAnalyzer<K, T, R> {
@@ -16,15 +19,22 @@ public interface AsyncAnalyzer<K, T, R> {
         return update(Arrays.asList(changes));
     }
 
-    void consumeResult(K fileKey, BiConsumer<K, R> consumer);
     void consumeResults(BiConsumer<K, R> consumer);
-    void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer);
+    void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler);
+    void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler);
+
+    default void consumeResult(K fileKey, BiConsumer<K, R> consumer) {
+        consumeResult(fileKey, consumer, k -> {});
+    }
+    default void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer) {
+        consumeResults(fileKeys, consumer, k -> {});
+    }
 
 
     /**
      * Wraps a synchronous analyzer in an asynchronous interface.
      * All operations are still synchronous, performed on the caller thread.
-     * The return values of all operations are completed by the time they are
+     * All returned CompletionStages are completed by the time they are
      * returned.
      * @param analyzer synchronous analyzer
      * @return wrapper for {@code analyzer} with asynchronous interface.
@@ -39,9 +49,13 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResult(K fileKey, BiConsumer<K, R> consumer) {
-                analyzer.getResult(fileKey).ifPresent(
-                        r -> consumer.accept(fileKey, r));
+            public void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
+                Optional<R> r = analyzer.getResult(fileKey);
+                if(r.isPresent()) {
+                    consumer.accept(fileKey, r.get());
+                } else {
+                    notFoundHandler.accept(fileKey);
+                }
             }
 
             @Override
@@ -52,9 +66,14 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer) {
-                for(Entry<K, R> e: analyzer.getResults(fileKeys).entrySet()) {
-                    consumer.accept(e.getKey(), e.getValue());
+            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
+                Map<K, R> results = analyzer.getResults(fileKeys);
+                for(K k: fileKeys) {
+                    if(results.containsKey(k)) {
+                        consumer.accept(k, results.get(k));
+                    } else {
+                        notFoundHandler.accept(k);
+                    }
                 }
             }
         };
@@ -81,10 +100,14 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResult(K fileKey, BiConsumer<K, R> consumer) {
+            public void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
                 singleThreadExecutor.execute(() -> {
-                    analyzer.getResult(fileKey).ifPresent(
-                            r -> consumer.accept(fileKey, r));
+                    Optional<R> r = analyzer.getResult(fileKey);
+                    if(r.isPresent()) {
+                        consumer.accept(fileKey, r.get());
+                    } else {
+                        notFoundHandler.accept(fileKey);
+                    }
                 });
             }
 
@@ -98,10 +121,15 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer) {
+            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
                 singleThreadExecutor.execute(() -> {
-                    for(Entry<K, R> e: analyzer.getResults(fileKeys).entrySet()) {
-                        consumer.accept(e.getKey(), e.getValue());
+                    Map<K, R> results = analyzer.getResults(fileKeys);
+                    for(K k: fileKeys) {
+                        if(results.containsKey(k)) {
+                            consumer.accept(k, results.get(k));
+                        } else {
+                            notFoundHandler.accept(k);
+                        }
                     }
                 });
             }

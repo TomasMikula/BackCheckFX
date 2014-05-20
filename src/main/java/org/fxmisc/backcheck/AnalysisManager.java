@@ -3,6 +3,7 @@ package org.fxmisc.backcheck;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -20,7 +21,7 @@ import org.reactfx.Subscription;
 
 public final class AnalysisManager<K, T, R> {
 
-    public static class Update<K, T> {
+    public static final class Update<K, T> {
         private final K f;
         private final T t;
 
@@ -99,7 +100,7 @@ public final class AnalysisManager<K, T, R> {
                     withTransformedResult(id, transformation, callback, toComplete);
                 }
             });
-        });
+        }, k -> toComplete.completeExceptionally(new NoSuchElementException("No analysis result for " + id)));
     }
 
     private void consumeResultsIfStillCurrent(long revision) {
