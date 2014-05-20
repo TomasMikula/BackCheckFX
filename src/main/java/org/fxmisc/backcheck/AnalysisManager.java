@@ -4,6 +4,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -11,6 +12,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import javafx.application.Platform;
 
@@ -69,7 +71,11 @@ public final class AnalysisManager<K, T, R> {
     }
 
     public <U> EventStream<Update<K, U>> transformedResults(BiFunction<K, R, U> transformation) {
-        return new ResultTransformationStream<U>(transformation);
+        return new ResultsTransformationStream<>(transformation);
+    }
+
+    public <U> EventStream<U> transformedResults(K fileId, Function<R, U> transformation) {
+        return new ResultTransformationStream<>(fileId, transformation);
     }
 
     public <U> CompletionStage<Void> withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback) {
@@ -131,10 +137,10 @@ public final class AnalysisManager<K, T, R> {
         void accept(K k, R r, long revision);
     }
 
-    private class ResultTransformationStream<U> extends LazilyBoundStream<Update<K, U>> implements ResultConsumer<K, R> {
+    private class ResultsTransformationStream<U> extends LazilyBoundStream<Update<K, U>> implements ResultConsumer<K, R> {
         private final BiFunction<K, R, U> transformation;
 
-        public ResultTransformationStream(BiFunction<K, R, U> transformation) {
+        public ResultsTransformationStream(BiFunction<K, R, U> transformation) {
             this.transformation = transformation;
         }
 
@@ -146,6 +152,34 @@ public final class AnalysisManager<K, T, R> {
                     emit(new Update<>(f, u));
                 }
             });
+        }
+
+        @Override
+        protected Subscription subscribeToInputs() {
+            resultConsumers = ListHelper.add(resultConsumers, this);
+            return () -> resultConsumers = ListHelper.remove(resultConsumers, this);
+        }
+    }
+
+    private class ResultTransformationStream<U> extends LazilyBoundStream<U> implements ResultConsumer<K, R> {
+        private final K fileId;
+        private final Function<R, U> transformation;
+
+        public ResultTransformationStream(K fileId, Function<R, U> transformation) {
+            this.fileId = fileId;
+            this.transformation = transformation;
+        }
+
+        @Override
+        public void accept(K f, R r, long revision) {
+            if(Objects.equals(f, fileId)); {
+                U u = transformation.apply(r);
+                clientThreadExecutor.execute(() -> {
+                    if(revision == currentRevision) {
+                        emit(u);
+                    }
+                });
+            }
         }
 
         @Override
