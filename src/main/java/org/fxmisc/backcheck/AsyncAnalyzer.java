@@ -2,7 +2,6 @@ package org.fxmisc.backcheck;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
@@ -21,13 +20,9 @@ public interface AsyncAnalyzer<K, T, R> {
 
     void consumeResults(BiConsumer<K, R> consumer);
     void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler);
-    void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler);
 
     default void consumeResult(K fileKey, BiConsumer<K, R> consumer) {
         consumeResult(fileKey, consumer, k -> {});
-    }
-    default void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer) {
-        consumeResults(fileKeys, consumer, k -> {});
     }
 
 
@@ -62,18 +57,6 @@ public interface AsyncAnalyzer<K, T, R> {
             public void consumeResults(BiConsumer<K, R> consumer) {
                 for(Entry<K, R> e: analyzer.getResults().entrySet()) {
                     consumer.accept(e.getKey(), e.getValue());
-                }
-            }
-
-            @Override
-            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
-                Map<K, R> results = analyzer.getResults(fileKeys);
-                for(K k: fileKeys) {
-                    if(results.containsKey(k)) {
-                        consumer.accept(k, results.get(k));
-                    } else {
-                        notFoundHandler.accept(k);
-                    }
                 }
             }
         };
@@ -116,20 +99,6 @@ public interface AsyncAnalyzer<K, T, R> {
                 singleThreadExecutor.execute(() -> {
                     for(Entry<K, R> e: analyzer.getResults().entrySet()) {
                         consumer.accept(e.getKey(), e.getValue());
-                    }
-                });
-            }
-
-            @Override
-            public void consumeResults(Set<K> fileKeys, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
-                singleThreadExecutor.execute(() -> {
-                    Map<K, R> results = analyzer.getResults(fileKeys);
-                    for(K k: fileKeys) {
-                        if(results.containsKey(k)) {
-                            consumer.accept(k, results.get(k));
-                        } else {
-                            notFoundHandler.accept(k);
-                        }
                     }
                 });
             }

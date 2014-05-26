@@ -16,7 +16,7 @@ targetCompatibility = '1.8'
 group = 'org.fxmisc.backcheck'
 
 dependencies {
-    compile group: 'org.reactfx', name: 'reactfx', version: '1.0.1+'
+    compile group: 'org.reactfx', name: 'reactfx', version: '1.0.2-SNAPSHOT'
 }
 
 task javadocJar(type: Jar, dependsOn: javadoc) {

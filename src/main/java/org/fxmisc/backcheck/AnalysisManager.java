@@ -5,10 +5,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -47,10 +47,15 @@ public final class AnalysisManager<K, T, R> {
     private final AsyncAnalyzer<K, T, R> asyncAnalyzer;
     private final Executor clientThreadExecutor;
 
-    private Set<K> dirtyFiles = new HashSet<>();
+    private final Set<K> dirtyFiles = new HashSet<>();
     private long currentRevision = 0;
 
     private ListHelper<ResultConsumer<K, R>> resultConsumers = null;
+
+    // resultConsumers reduced into one.
+    // null means that it has to be re-computed,
+    // Optional.empty means resultConsumers is empty
+    private Optional<ResultConsumer<K, R>> resultConsumer = null;
 
     private AnalysisManager(AsyncAnalyzer<K, T, R> analyzer, Executor clientThreadExecutor) {
         this.asyncAnalyzer = analyzer;
@@ -111,25 +116,63 @@ public final class AnalysisManager<K, T, R> {
 
     private void consumeResultsIfStillCurrent(long revision) {
         if(revision == currentRevision) {
-            CountDownLatch cdl = new CountDownLatch(ListHelper.size(resultConsumers));
-            ListHelper.forEach(resultConsumers, consumer -> {
-                BiConsumer<K, R> biConsumer = (k, r) -> {
-                    try {
-                        consumer.accept(k, r, revision);
-                    } finally {
-                        cdl.countDown();
-                        if(cdl.getCount() == 0) { // may occur more than once, but that's OK
+            getResultConsumer().ifPresent(consumer -> {
+                for(K f: dirtyFiles) {
+                    asyncAnalyzer.consumeResult(f, (k, r) -> {
+                        try {
+                            consumer.accept(k, r, revision);
+                        } finally {
                             clientThreadExecutor.execute(() -> {
                                 if(revision == currentRevision) {
-                                    dirtyFiles = new HashSet<>();
+                                    dirtyFiles.remove(k);
                                 }
                             });
                         }
-                    }
-                };
-                asyncAnalyzer.consumeResults(dirtyFiles, biConsumer);
+                    }, k -> clientThreadExecutor.execute(() -> {
+                        if(revision == currentRevision) {
+                            dirtyFiles.remove(k);
+                        }
+                    }));
+                }
             });
         }
+    }
+
+    private void addResultConsumer(ResultConsumer<K, R> consumer) {
+        resultConsumers = ListHelper.add(resultConsumers, consumer);
+        resultConsumer = null;
+    }
+
+    private void removeResultConsumer(ResultConsumer<K, R> consumer) {
+        resultConsumers = ListHelper.remove(resultConsumers, consumer);
+        resultConsumer = null;
+    }
+
+    private Optional<ResultConsumer<K, R>> getResultConsumer() {
+        if(resultConsumer == null) {
+            if(ListHelper.isEmpty(resultConsumers)) {
+                resultConsumer = Optional.empty();
+            } else {
+                @SuppressWarnings("unchecked")
+                ResultConsumer<K, R>[] consumers = ListHelper.toArray(
+                        resultConsumers,
+                        i -> (ResultConsumer<K, R>[]) new ResultConsumer<?, ?>[i]);
+                resultConsumer = Optional.of((k, r, rev) -> {
+                    Throwable thrown = null;
+                    for(ResultConsumer<K, R> consumer: consumers) {
+                        try {
+                            consumer.accept(k, r, rev);
+                        } catch(Throwable t) {
+                            thrown = t;
+                        }
+                    }
+                    if(thrown != null) {
+                        throw new RuntimeException(thrown);
+                    }
+                });
+            }
+        }
+        return resultConsumer;
     }
 
     @FunctionalInterface
@@ -156,8 +199,8 @@ public final class AnalysisManager<K, T, R> {
 
         @Override
         protected Subscription subscribeToInputs() {
-            resultConsumers = ListHelper.add(resultConsumers, this);
-            return () -> resultConsumers = ListHelper.remove(resultConsumers, this);
+            addResultConsumer(this);
+            return () -> removeResultConsumer(this);
         }
     }
 
@@ -184,8 +227,8 @@ public final class AnalysisManager<K, T, R> {
 
         @Override
         protected Subscription subscribeToInputs() {
-            resultConsumers = ListHelper.add(resultConsumers, this);
-            return () -> resultConsumers = ListHelper.remove(resultConsumers, this);
+            addResultConsumer(this);
+            return () -> removeResultConsumer(this);
         }
     }
 }
