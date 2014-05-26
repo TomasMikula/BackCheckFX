@@ -17,6 +17,8 @@ import java.util.function.Function;
 import javafx.application.Platform;
 
 import org.reactfx.EventStream;
+import org.reactfx.Guard;
+import org.reactfx.Indicator;
 import org.reactfx.LazilyBoundStream;
 import org.reactfx.ListHelper;
 import org.reactfx.Subscription;
@@ -46,8 +48,9 @@ public final class AnalysisManager<K, T, R> {
 
     private final AsyncAnalyzer<K, T, R> asyncAnalyzer;
     private final Executor clientThreadExecutor;
-
     private final Set<K> dirtyFiles = new HashSet<>();
+    private final Indicator busy = new Indicator();
+
     private long currentRevision = 0;
 
     private ListHelper<ResultConsumer<K, R>> resultConsumers = null;
@@ -62,6 +65,13 @@ public final class AnalysisManager<K, T, R> {
         this.clientThreadExecutor = clientThreadExecutor;
     }
 
+    public Indicator busyProperty() {
+        return busy;
+    }
+    public boolean isBusy() {
+        return busy.isOn();
+    }
+
     @SafeVarargs
     public final void handleFileChanges(InputChange<K, T>... changes) {
         handleFileChanges(Arrays.asList(changes));
@@ -69,9 +79,13 @@ public final class AnalysisManager<K, T, R> {
 
     public void handleFileChanges(List<? extends InputChange<K, T>> changes) {
         long revision = ++currentRevision;
+        Guard g = busy.on();
         asyncAnalyzer.update(changes).thenAcceptAsync(affectedFiles -> {
             dirtyFiles.addAll(affectedFiles);
-            consumeResultsIfStillCurrent(revision);
+            if(revision == currentRevision) {
+                publishResults();
+            }
+            g.close();
         }, clientThreadExecutor);
     }
 
@@ -85,6 +99,8 @@ public final class AnalysisManager<K, T, R> {
 
     public <U> CompletionStage<Void> withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback) {
         CompletableFuture<Void> future = new CompletableFuture<>();
+        Guard g = busy.on();
+        future.whenCompleteAsync((res, err) -> g.close(), clientThreadExecutor);
         withTransformedResult(id, transformation, callback, future);
         return future;
     }
@@ -114,28 +130,26 @@ public final class AnalysisManager<K, T, R> {
         }, k -> toComplete.completeExceptionally(new NoSuchElementException("No analysis result for " + id)));
     }
 
-    private void consumeResultsIfStillCurrent(long revision) {
-        if(revision == currentRevision) {
-            getResultConsumer().ifPresent(consumer -> {
-                for(K f: dirtyFiles) {
-                    asyncAnalyzer.consumeResult(f, (k, r) -> {
-                        try {
-                            consumer.accept(k, r, revision);
-                        } finally {
-                            clientThreadExecutor.execute(() -> {
-                                if(revision == currentRevision) {
-                                    dirtyFiles.remove(k);
-                                }
-                            });
-                        }
-                    }, k -> clientThreadExecutor.execute(() -> {
-                        if(revision == currentRevision) {
-                            dirtyFiles.remove(k);
-                        }
-                    }));
+    private void publishResults() {
+        long revision = currentRevision;
+        getResultConsumer().ifPresent(consumer -> {
+            BiConsumer<K, Guard> eventually = (k, g) -> clientThreadExecutor.execute(() -> {
+                if(revision == currentRevision) {
+                    dirtyFiles.remove(k);
                 }
+                g.close();
             });
-        }
+            for(K f: dirtyFiles) {
+                Guard g = busy.on();
+                asyncAnalyzer.consumeResult(f, (k, r) -> {
+                    try {
+                        consumer.accept(k, r, revision);
+                    } finally {
+                        eventually.accept(k, g);
+                    }
+                }, k -> eventually.accept(k, g));
+            }
+        });
     }
 
     private void addResultConsumer(ResultConsumer<K, R> consumer) {
