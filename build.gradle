@@ -16,7 +16,7 @@ targetCompatibility = '1.8'
 group = 'org.fxmisc.backcheck'
 
 dependencies {
-    compile group: 'org.reactfx', name: 'reactfx', version: '1.0.2-SNAPSHOT'
+    compile group: 'org.reactfx', name: 'reactfx', version: '[1.1.0,)'
 }
 
 javadoc {

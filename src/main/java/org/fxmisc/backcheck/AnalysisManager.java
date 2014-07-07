@@ -21,8 +21,8 @@ import org.reactfx.EventStream;
 import org.reactfx.Guard;
 import org.reactfx.Indicator;
 import org.reactfx.LazilyBoundStream;
-import org.reactfx.ListHelper;
 import org.reactfx.Subscription;
+import org.reactfx.util.ListHelper;
 
 public final class AnalysisManager<K, T, R> {
 
