@@ -3,9 +3,7 @@ package org.fxmisc.backcheck;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -54,12 +52,11 @@ public final class AnalysisManager<K, T, R> {
 
     private long currentRevision = 0;
 
-    private ListHelper<ResultConsumer<K, R>> resultConsumers = null;
+    private ListHelper<ResultHandler<K, R>> resultHandlers = null;
 
-    // resultConsumers reduced into one.
-    // null means that it has to be re-computed,
-    // Optional.empty means resultConsumers is empty
-    private Optional<ResultConsumer<K, R>> resultConsumer = null;
+    // resultHandlers reduced into one.
+    // null means that it has to be re-computed.
+    private ResultHandler<K, R> resultHandler = null;
 
     private AnalysisManager(AsyncAnalyzer<K, T, R> analyzer, Executor clientThreadExecutor) {
         this.asyncAnalyzer = analyzer;
@@ -98,7 +95,7 @@ public final class AnalysisManager<K, T, R> {
         return new ResultTransformationStream<>(fileId, transformation);
     }
 
-    public <U> CompletionStage<Void> withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback) {
+    public <U> CompletionStage<Void> withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback) {
         CompletableFuture<Void> future = new CompletableFuture<>();
         Guard g = busy.on();
         future.whenCompleteAsync((res, err) -> g.close(), clientThreadExecutor);
@@ -106,88 +103,84 @@ public final class AnalysisManager<K, T, R> {
         return future;
     }
 
-    private <U> void withTransformedResult(K id, BiFunction<K, R, U> transformation, BiConsumer<K, U> callback, CompletableFuture<Void> toComplete) {
+    private <U> void withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback, CompletableFuture<Void> toComplete) {
         long revision = currentRevision;
-        asyncAnalyzer.consumeResult(id, (k, r) -> {
-            U u;
-            try {
-                u = transformation.apply(k, r);
-            } catch(Throwable t) {
-                toComplete.completeExceptionally(t);
-                return;
-            }
-            clientThreadExecutor.execute(() -> {
-                if(revision == currentRevision) {
-                    try {
-                        callback.accept(k, u);
-                        toComplete.complete(null);
-                    } catch(Throwable t) {
-                        toComplete.completeExceptionally(t);
+        asyncAnalyzer.whenReadyApply(id, transformation)
+                .whenCompleteAsync((u, err) -> {
+                    if(err != null) {
+                        toComplete.completeExceptionally(err);
+                    } else if(revision == currentRevision) {
+                        try {
+                            callback.accept(u);
+                            toComplete.complete(null);
+                        } catch(Throwable ex) {
+                            toComplete.completeExceptionally(ex);
+                        }
+                    } else { // try again
+                        withTransformedResult(id, transformation, callback, toComplete);
                     }
-                } else { // try again
-                    withTransformedResult(id, transformation, callback, toComplete);
-                }
-            });
-        }, k -> toComplete.completeExceptionally(new NoSuchElementException("No analysis result for " + id)));
+                }, clientThreadExecutor);
     }
 
     private void publishResults() {
         long revision = currentRevision;
-        getResultConsumer().ifPresent(consumer -> {
-            BiConsumer<K, Guard> eventually = (k, g) -> clientThreadExecutor.execute(() -> {
-                if(revision == currentRevision) {
-                    dirtyFiles.remove(k);
-                }
-                g.close();
-            });
-            for(K f: dirtyFiles) {
-                Guard g = busy.on();
-                asyncAnalyzer.consumeResult(f, (k, r) -> {
-                    try {
-                        consumer.accept(k, r, revision);
-                    } finally {
-                        eventually.accept(k, g);
-                    }
-                }, k -> eventually.accept(k, g));
-            }
-        });
-    }
-
-    private void addResultConsumer(ResultConsumer<K, R> consumer) {
-        resultConsumers = ListHelper.add(resultConsumers, consumer);
-        resultConsumer = null;
-    }
-
-    private void removeResultConsumer(ResultConsumer<K, R> consumer) {
-        resultConsumers = ListHelper.remove(resultConsumers, consumer);
-        resultConsumer = null;
-    }
-
-    private Optional<ResultConsumer<K, R>> getResultConsumer() {
-        if(resultConsumer == null) {
-            if(ListHelper.isEmpty(resultConsumers)) {
-                resultConsumer = Optional.empty();
-            } else {
-                @SuppressWarnings("unchecked")
-                ResultConsumer<K, R>[] consumers = ListHelper.toArray(
-                        resultConsumers,
-                        i -> (ResultConsumer<K, R>[]) new ResultConsumer<?, ?>[i]);
-                resultConsumer = Optional.of((k, r, rev) -> {
-                    Throwable thrown = null;
-                    for(ResultConsumer<K, R> consumer: consumers) {
-                        try {
-                            consumer.accept(k, r, rev);
-                        } catch(Throwable t) {
-                            thrown = t;
+        ResultHandler<K, R> consumer = getResultHandler();
+        for(K f: dirtyFiles) {
+            Guard g = busy.on();
+            asyncAnalyzer.whenReadyAccept(f, r -> consumer.onSuccess(f, r, revision))
+                    .whenCompleteAsync((res, err) -> {
+                        if(revision == currentRevision) {
+                            dirtyFiles.remove(f);
                         }
-                    }
-                    if(thrown != null) {
-                        throw new RuntimeException(thrown);
-                    }
-                });
-            }
+                        g.close();
+                        if(err != null) {
+                            consumer.onError(f, err);
+                        }
+                    }, clientThreadExecutor);
         }
-        return resultConsumer;
+    }
+
+    private void addResultHandler(ResultHandler<K, R> consumer) {
+        resultHandlers = ListHelper.add(resultHandlers, consumer);
+        resultHandler = null;
+    }
+
+    private void removeResultHandler(ResultHandler<K, R> consumer) {
+        resultHandlers = ListHelper.remove(resultHandlers, consumer);
+        resultHandler = null;
+    }
+
+    private ResultHandler<K, R> getResultHandler() {
+        if(resultHandler == null) {
+            @SuppressWarnings("unchecked")
+            ResultHandler<K, R>[] handlers = ListHelper.toArray(
+                    resultHandlers,
+                    i -> (ResultHandler<K, R>[]) new ResultHandler<?, ?>[i]);
+            resultHandler = ResultHandler.create(
+                    (k, r, rev) -> {
+                        for(ResultHandler<K, R> handler: handlers) {
+                            try {
+                                handler.onSuccess(k, r, rev);
+                            } catch(Throwable err) {
+                                try {
+                                    handler.onError(k, err);
+                                } catch(Throwable t) {
+                                    // ignore
+                                }
+                            }
+                        }
+                    },
+                    (k, err) -> {
+                        for(ResultHandler<K, R> handler: handlers) {
+                            try {
+                                handler.onError(k, err);
+                            } catch(Throwable t) {
+                                // ignore
+                            }
+                        }
+                    });
+        }
+        return resultHandler;
     }
 
     @FunctionalInterface
@@ -195,7 +188,29 @@ public final class AnalysisManager<K, T, R> {
         void accept(K k, R r, long revision);
     }
 
-    private class ResultsTransformationStream<U> extends LazilyBoundStream<Update<K, U>> implements ResultConsumer<K, R> {
+    private interface ResultHandler<K, R> {
+        void onSuccess(K k, R r, long revision);
+        void onError(K k, Throwable ex);
+
+        static <K, R> ResultHandler<K, R> create(
+                ResultConsumer<K, R> onSuccess,
+                BiConsumer<K, Throwable> onError) {
+            return new ResultHandler<K, R>() {
+
+                @Override
+                public void onSuccess(K k, R r, long revision) {
+                    onSuccess.accept(k, r, revision);
+                }
+
+                @Override
+                public void onError(K k, Throwable ex) {
+                    onError.accept(k, ex);
+                }
+            };
+        }
+    }
+
+    private class ResultsTransformationStream<U> extends LazilyBoundStream<Update<K, U>> implements ResultHandler<K, R> {
         private final BiFunction<K, R, U> transformation;
 
         public ResultsTransformationStream(BiFunction<K, R, U> transformation) {
@@ -203,7 +218,7 @@ public final class AnalysisManager<K, T, R> {
         }
 
         @Override
-        public void accept(K f, R r, long revision) {
+        public void onSuccess(K f, R r, long revision) {
             U u = transformation.apply(f, r);
             clientThreadExecutor.execute(() -> {
                 if(revision == currentRevision) {
@@ -213,13 +228,18 @@ public final class AnalysisManager<K, T, R> {
         }
 
         @Override
+        public void onError(K f, Throwable err) {
+            clientThreadExecutor.execute(() -> reportError(err));
+        }
+
+        @Override
         protected Subscription subscribeToInputs() {
-            addResultConsumer(this);
-            return () -> removeResultConsumer(this);
+            addResultHandler(this);
+            return () -> removeResultHandler(this);
         }
     }
 
-    private class ResultTransformationStream<U> extends LazilyBoundStream<U> implements ResultConsumer<K, R> {
+    private class ResultTransformationStream<U> extends LazilyBoundStream<U> implements ResultHandler<K, R> {
         private final K fileId;
         private final Function<R, U> transformation;
 
@@ -229,7 +249,7 @@ public final class AnalysisManager<K, T, R> {
         }
 
         @Override
-        public void accept(K f, R r, long revision) {
+        public void onSuccess(K f, R r, long revision) {
             if(Objects.equals(f, fileId)) {
                 U u = transformation.apply(r);
                 clientThreadExecutor.execute(() -> {
@@ -241,16 +261,21 @@ public final class AnalysisManager<K, T, R> {
         }
 
         @Override
+        public void onError(K f, Throwable err) {
+            if(Objects.equals(f, fileId)) {
+                clientThreadExecutor.execute(() -> reportError(err));
+            }
+        }
+
+        @Override
         protected Subscription subscribeToInputs() {
-            addResultConsumer(this);
-            return () -> removeResultConsumer(this);
+            addResultHandler(this);
+            return () -> removeResultHandler(this);
         }
 
         @Override
         protected void newSubscriber(Consumer<? super U> subscriber) {
-            withTransformedResult(fileId,
-                    (k, r) -> transformation.apply(r),
-                    (k, u) -> emit(u));
+            withTransformedResult(fileId, transformation, this::emit);
         }
     }
 }

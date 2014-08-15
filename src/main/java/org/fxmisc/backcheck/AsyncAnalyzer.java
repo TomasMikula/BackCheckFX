@@ -3,13 +3,13 @@ package org.fxmisc.backcheck;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map.Entry;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 public interface AsyncAnalyzer<K, T, R> {
@@ -18,12 +18,12 @@ public interface AsyncAnalyzer<K, T, R> {
         return update(Arrays.asList(changes));
     }
 
-    void consumeResults(BiConsumer<K, R> consumer);
-    void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler);
-
-    default void consumeResult(K fileKey, BiConsumer<K, R> consumer) {
-        consumeResult(fileKey, consumer, k -> {});
+    <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f);
+    default CompletionStage<?> whenReadyAccept(K fileKey, Consumer<? super R> f) {
+        return whenReadyApply(fileKey, r -> { f.accept(r); return null; });
     }
+
+    void consumeResults(BiConsumer<K, R> consumer);
 
 
     /**
@@ -44,13 +44,15 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
-                Optional<R> r = analyzer.getResult(fileKey);
-                if(r.isPresent()) {
-                    consumer.accept(fileKey, r.get());
-                } else {
-                    notFoundHandler.accept(fileKey);
+            public <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
+                CompletableFuture<V> future = new CompletableFuture<>();
+                try {
+                    V v = analyzer.getResult(fileKey).map(f).get(); // both map() and get() may throw
+                    future.complete(v);
+                } catch(Throwable e) {
+                    future.completeExceptionally(e);
                 }
+                return future;
             }
 
             @Override
@@ -83,15 +85,17 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public void consumeResult(K fileKey, BiConsumer<K, R> consumer, Consumer<K> notFoundHandler) {
+            public <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
+                CompletableFuture<V> future = new CompletableFuture<>();
                 singleThreadExecutor.execute(() -> {
-                    Optional<R> r = analyzer.getResult(fileKey);
-                    if(r.isPresent()) {
-                        consumer.accept(fileKey, r.get());
-                    } else {
-                        notFoundHandler.accept(fileKey);
+                    try {
+                        V v = analyzer.getResult(fileKey).map(f).get(); // both map() and get() may throw
+                        future.complete(v);
+                    } catch(Throwable e) {
+                        future.completeExceptionally(e);
                     }
                 });
+                return future;
             }
 
             @Override
