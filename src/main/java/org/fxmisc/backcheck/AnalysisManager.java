@@ -230,7 +230,7 @@ public final class AnalysisManager<K, T, R> {
 
         @Override
         public void accept(K f, R r, long revision) {
-            if(Objects.equals(f, fileId)); {
+            if(Objects.equals(f, fileId)) {
                 U u = transformation.apply(r);
                 clientThreadExecutor.execute(() -> {
                     if(revision == currentRevision) {
