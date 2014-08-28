@@ -20,7 +20,13 @@ public interface AsyncAnalyzer<K, T, R> {
 
     <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f);
     default CompletionStage<?> whenReadyAccept(K fileKey, Consumer<? super R> f) {
-        return whenReadyApply(fileKey, r -> { f.accept(r); return null; });
+        return whenReadyApply(fileKey, r -> {
+            f.accept(r);
+            // Return any non-null object.
+            // It has to be non-null so that Optional.ofNullable applied to it
+            // does not yield empty Optional.
+            return f;
+        });
     }
 
     void consumeResults(BiConsumer<K, R> consumer);
