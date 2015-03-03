@@ -16,11 +16,12 @@ import java.util.function.Function;
 import javafx.application.Platform;
 
 import org.reactfx.EventStream;
+import org.reactfx.EventStreamBase;
 import org.reactfx.Guard;
-import org.reactfx.Indicator;
-import org.reactfx.LazilyBoundStream;
 import org.reactfx.Subscription;
+import org.reactfx.SuspendableNo;
 import org.reactfx.util.ListHelper;
+import org.reactfx.util.Try;
 
 public final class AnalysisManager<K, T, R> {
 
@@ -48,7 +49,7 @@ public final class AnalysisManager<K, T, R> {
     private final AsyncAnalyzer<K, T, R> asyncAnalyzer;
     private final Executor clientThreadExecutor;
     private final Set<K> dirtyFiles = new HashSet<>();
-    private final Indicator busy = new Indicator();
+    private final SuspendableNo busy = new SuspendableNo();
 
     private long currentRevision = 0;
 
@@ -63,11 +64,11 @@ public final class AnalysisManager<K, T, R> {
         this.clientThreadExecutor = clientThreadExecutor;
     }
 
-    public Indicator busyProperty() {
+    public SuspendableNo busyProperty() {
         return busy;
     }
     public boolean isBusy() {
-        return busy.isOn();
+        return busy.getValue();
     }
 
     @SafeVarargs
@@ -77,7 +78,7 @@ public final class AnalysisManager<K, T, R> {
 
     public void handleFileChanges(List<? extends InputChange<K, T>> changes) {
         long revision = ++currentRevision;
-        Guard g = busy.on();
+        Guard g = busy.suspend();
         asyncAnalyzer.update(changes).thenAcceptAsync(affectedFiles -> {
             dirtyFiles.addAll(affectedFiles);
             if(revision == currentRevision) {
@@ -87,17 +88,17 @@ public final class AnalysisManager<K, T, R> {
         }, clientThreadExecutor);
     }
 
-    public <U> EventStream<Update<K, U>> transformedResults(BiFunction<K, R, U> transformation) {
+    public <U> EventStream<Try<Update<K, U>>> transformedResults(BiFunction<K, R, U> transformation) {
         return new ResultsTransformationStream<>(transformation);
     }
 
-    public <U> EventStream<U> transformedResults(K fileId, Function<R, U> transformation) {
+    public <U> EventStream<Try<U>> transformedResults(K fileId, Function<R, U> transformation) {
         return new ResultTransformationStream<>(fileId, transformation);
     }
 
     public <U> CompletionStage<Void> withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback) {
         CompletableFuture<Void> future = new CompletableFuture<>();
-        Guard g = busy.on();
+        Guard g = busy.suspend();
         future.whenCompleteAsync((res, err) -> g.close(), clientThreadExecutor);
         withTransformedResult(id, transformation, callback, future);
         return future;
@@ -126,7 +127,7 @@ public final class AnalysisManager<K, T, R> {
         long revision = currentRevision;
         ResultHandler<K, R> consumer = getResultHandler();
         for(K f: dirtyFiles) {
-            Guard g = busy.on();
+            Guard g = busy.suspend();
             asyncAnalyzer.whenReadyAccept(f, r -> consumer.onSuccess(f, r, revision))
                     .whenCompleteAsync((res, err) -> {
                         if(revision == currentRevision) {
@@ -210,7 +211,7 @@ public final class AnalysisManager<K, T, R> {
         }
     }
 
-    private class ResultsTransformationStream<U> extends LazilyBoundStream<Update<K, U>> implements ResultHandler<K, R> {
+    private class ResultsTransformationStream<U> extends EventStreamBase<Try<Update<K, U>>> implements ResultHandler<K, R> {
         private final BiFunction<K, R, U> transformation;
 
         public ResultsTransformationStream(BiFunction<K, R, U> transformation) {
@@ -222,24 +223,24 @@ public final class AnalysisManager<K, T, R> {
             U u = transformation.apply(f, r);
             clientThreadExecutor.execute(() -> {
                 if(revision == currentRevision) {
-                    emit(new Update<>(f, u));
+                    emit(Try.success(new Update<>(f, u)));
                 }
             });
         }
 
         @Override
         public void onError(K f, Throwable err) {
-            clientThreadExecutor.execute(() -> reportError(err));
+            clientThreadExecutor.execute(() -> emit(Try.failure(err)));
         }
 
         @Override
-        protected Subscription subscribeToInputs() {
+        protected Subscription observeInputs() {
             addResultHandler(this);
             return () -> removeResultHandler(this);
         }
     }
 
-    private class ResultTransformationStream<U> extends LazilyBoundStream<U> implements ResultHandler<K, R> {
+    private class ResultTransformationStream<U> extends EventStreamBase<Try<U>> implements ResultHandler<K, R> {
         private final K fileId;
         private final Function<R, U> transformation;
 
@@ -254,7 +255,7 @@ public final class AnalysisManager<K, T, R> {
                 U u = transformation.apply(r);
                 clientThreadExecutor.execute(() -> {
                     if(revision == currentRevision) {
-                        emit(u);
+                        emit(Try.success(u));
                     }
                 });
             }
@@ -263,19 +264,19 @@ public final class AnalysisManager<K, T, R> {
         @Override
         public void onError(K f, Throwable err) {
             if(Objects.equals(f, fileId)) {
-                clientThreadExecutor.execute(() -> reportError(err));
+                clientThreadExecutor.execute(() -> emit(Try.failure(err)));
             }
         }
 
         @Override
-        protected Subscription subscribeToInputs() {
+        protected Subscription observeInputs() {
             addResultHandler(this);
             return () -> removeResultHandler(this);
         }
 
         @Override
-        protected void newSubscriber(Consumer<? super U> subscriber) {
-            withTransformedResult(fileId, transformation, this::emit);
+        protected void newObserver(Consumer<? super Try<U>> subscriber) {
+            withTransformedResult(fileId, transformation, r -> emit(Try.success(r)));
         }
     }
 }
