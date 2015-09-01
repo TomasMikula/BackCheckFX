@@ -79,13 +79,18 @@ public final class AnalysisManager<K, T, R> {
     public void handleFileChanges(List<? extends InputChange<K, T>> changes) {
         long revision = ++currentRevision;
         Guard g = busy.suspend();
-        asyncAnalyzer.update(changes).thenAcceptAsync(affectedFiles -> {
-            dirtyFiles.addAll(affectedFiles);
-            if(revision == currentRevision) {
-                publishResults();
-            }
-            g.close();
-        }, clientThreadExecutor);
+        asyncAnalyzer.update(changes)
+                .whenCompleteAsync((affectedFiles, err) -> {
+                    if(err != null) {
+                        err.printStackTrace();
+                    } else {
+                        dirtyFiles.addAll(affectedFiles);
+                        if(revision == currentRevision) {
+                            publishResults();
+                        }
+                    }
+                    g.close();
+                }, clientThreadExecutor);
     }
 
     public <U> EventStream<Try<Update<K, U>>> transformedResults(BiFunction<K, R, U> transformation) {
