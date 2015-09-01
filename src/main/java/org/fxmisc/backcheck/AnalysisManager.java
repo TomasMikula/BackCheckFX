@@ -96,26 +96,30 @@ public final class AnalysisManager<K, T, R> {
         return new ResultTransformationStream<>(fileId, transformation);
     }
 
-    public <U> CompletionStage<Void> withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback) {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+    public <U> CompletionStage<Boolean> withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         Guard g = busy.suspend();
         future.whenCompleteAsync((res, err) -> g.close(), clientThreadExecutor);
         withTransformedResult(id, transformation, callback, future);
         return future;
     }
 
-    private <U> void withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback, CompletableFuture<Void> toComplete) {
+    private <U> void withTransformedResult(K id, Function<R, U> transformation, Consumer<U> callback, CompletableFuture<Boolean> toComplete) {
         long revision = currentRevision;
         asyncAnalyzer.whenReadyApply(id, transformation)
-                .whenCompleteAsync((u, err) -> {
+                .whenCompleteAsync((ou, err) -> {
                     if(err != null) {
                         toComplete.completeExceptionally(err);
                     } else if(revision == currentRevision) {
-                        try {
-                            callback.accept(u);
-                            toComplete.complete(null);
-                        } catch(Throwable ex) {
-                            toComplete.completeExceptionally(ex);
+                        if(ou.isPresent()) {
+                            try {
+                                callback.accept(ou.get());
+                                toComplete.complete(true);
+                            } catch(Throwable ex) {
+                                toComplete.completeExceptionally(ex);
+                            }
+                        } else {
+                            toComplete.complete(false);
                         }
                     } else { // try again
                         withTransformedResult(id, transformation, callback, toComplete);
@@ -136,6 +140,8 @@ public final class AnalysisManager<K, T, R> {
                         g.close();
                         if(err != null) {
                             consumer.onError(f, err);
+                        } else if(!res) {
+                            throw new AssertionError("Oops, shouldn't happen.");
                         }
                     }, clientThreadExecutor);
         }
@@ -276,7 +282,14 @@ public final class AnalysisManager<K, T, R> {
 
         @Override
         protected void newObserver(Consumer<? super Try<U>> subscriber) {
-            withTransformedResult(fileId, transformation, r -> emit(Try.success(r)));
+            withTransformedResult(fileId, transformation, r -> emit(Try.success(r)))
+                    .whenCompleteAsync((found, err) -> {
+                        if(err != null) {
+                            emit(Try.failure(err));
+                        } else if(!found) {
+                            // fileId not found in the analyzer, do nothing
+                        }
+                    }, clientThreadExecutor);
         }
     }
 }

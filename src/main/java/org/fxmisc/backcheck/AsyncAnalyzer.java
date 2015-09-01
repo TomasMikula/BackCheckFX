@@ -3,6 +3,7 @@ package org.fxmisc.backcheck;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -18,15 +19,15 @@ public interface AsyncAnalyzer<K, T, R> {
         return update(Arrays.asList(changes));
     }
 
-    <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f);
-    default CompletionStage<?> whenReadyAccept(K fileKey, Consumer<? super R> f) {
+    <V> CompletionStage<Optional<V>> whenReadyApply(K fileKey, Function<? super R, ? extends V> f);
+    default CompletionStage<Boolean> whenReadyAccept(K fileKey, Consumer<? super R> f) {
         return whenReadyApply(fileKey, r -> {
             f.accept(r);
             // Return any non-null object.
             // It has to be non-null so that Optional.ofNullable applied to it
             // does not yield empty Optional.
             return f;
-        });
+        }).thenApply(op -> op.isPresent() ? true : false);
     }
 
     void consumeResults(BiConsumer<K, R> consumer);
@@ -50,10 +51,10 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
-                CompletableFuture<V> future = new CompletableFuture<>();
+            public <V> CompletionStage<Optional<V>> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
+                CompletableFuture<Optional<V>> future = new CompletableFuture<>();
                 try {
-                    V v = analyzer.getResult(fileKey).map(f).get(); // both map() and get() may throw
+                    Optional<V> v = analyzer.getResult(fileKey).map(f); // map() may throw
                     future.complete(v);
                 } catch(Throwable e) {
                     future.completeExceptionally(e);
@@ -91,11 +92,11 @@ public interface AsyncAnalyzer<K, T, R> {
             }
 
             @Override
-            public <V> CompletionStage<V> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
-                CompletableFuture<V> future = new CompletableFuture<>();
+            public <V> CompletionStage<Optional<V>> whenReadyApply(K fileKey, Function<? super R, ? extends V> f) {
+                CompletableFuture<Optional<V>> future = new CompletableFuture<>();
                 singleThreadExecutor.execute(() -> {
                     try {
-                        V v = analyzer.getResult(fileKey).map(f).get(); // both map() and get() may throw
+                        Optional<V> v = analyzer.getResult(fileKey).map(f); // map() may throw
                         future.complete(v);
                     } catch(Throwable e) {
                         future.completeExceptionally(e);
